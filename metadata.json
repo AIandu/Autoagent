@@ -1,0 +1,6 @@
+{
+  "name": "RepoMaintainer Autonomous GitHub Engineer",
+  "description": "Persistent autonomous GitHub repository maintenance agent for AIandu and Dessiidoo repositories.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
