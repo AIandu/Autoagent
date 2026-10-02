@@ -545,8 +545,9 @@ tests/test_pipeline.py .                                                 [100%]
     filesChanged: modifiedPaths,
     verificationResult: 'All test suites passed; 0 regressions detected.',
     commitSha,
-    prNumber: Math.floor(Math.random() * 20) + 12,
-    prUrl: `https://github.com/${repo.fullName}/pull/${Math.floor(Math.random() * 20) + 12}`,
+    pushedToRemote: false, // NOT pushed to remote GitHub until explicitly authorized
+    prNumber: undefined,
+    prUrl: undefined,
   };
 
   // Update Persistent Project Memory
@@ -583,25 +584,288 @@ tests/test_pipeline.py .                                                 [100%]
   });
 });
 
-// 9. Create Pull Request / Push branch
-app.post('/api/github/create-pr', (req, res) => {
-  const { repoKey, branchName, title, body } = req.body;
+// 9. Verify GitHub Personal Access Token (PAT)
+app.post('/api/github/verify-token', async (req, res) => {
+  const token = (req.body.token || req.headers['x-github-token'] || process.env.GITHUB_TOKEN) as string;
+  if (!token || !token.trim()) {
+    return res.status(400).json({ valid: false, error: 'No GitHub token provided' });
+  }
+
+  try {
+    const userRes = await fetch('https://api.github.com/user', {
+      headers: {
+        'Authorization': `Bearer ${token.trim()}`,
+        'User-Agent': 'RepoMaintainer-Agent',
+        'Accept': 'application/vnd.github.v3+json',
+      },
+    });
+
+    if (!userRes.ok) {
+      const errData = await userRes.json().catch(() => ({}));
+      return res.status(userRes.status).json({
+        valid: false,
+        error: errData.message || `GitHub returned ${userRes.status}: ${userRes.statusText}`,
+      });
+    }
+
+    const userData = await userRes.json();
+    const scopesHeader = userRes.headers.get('x-oauth-scopes') || '';
+    const scopes = scopesHeader.split(',').map((s) => s.trim()).filter(Boolean);
+    const hasRepoScope = scopes.includes('repo') || scopes.includes('public_repo');
+    const isTargetOwner = ['aiandu', 'dessiidoo'].includes((userData.login || '').toLowerCase());
+
+    console.log(`[GitHub API] Token verified for user: ${userData.login}. Scopes: [${scopes.join(', ')}]`);
+
+    res.json({
+      valid: true,
+      user: {
+        login: userData.login,
+        name: userData.name || userData.login,
+        avatarUrl: userData.avatar_url,
+        htmlUrl: userData.html_url,
+      },
+      scopes,
+      hasRepoScope,
+      isTargetOwner,
+    });
+  } catch (err: any) {
+    console.error('[GitHub API] Verification error:', err);
+    res.status(500).json({ valid: false, error: err.message || 'Failed to connect to GitHub API' });
+  }
+});
+
+// 10. Real GitHub Push & Pull Request Creation
+app.post('/api/github/create-pr', async (req, res) => {
+  const { repoKey, branchName, title, body, files } = req.body;
+  const token = (req.body.token || req.headers['x-github-token'] || process.env.GITHUB_TOKEN) as string | undefined;
   const repo = repoDatabase[repoKey];
 
   if (!repo) {
-    return res.status(404).json({ error: `Repository ${repoKey} not found` });
+    return res.status(404).json({ error: `Repository ${repoKey} not found in agent database` });
   }
 
-  const prNumber = Math.floor(Math.random() * 50) + 20;
-  const prUrl = `https://github.com/${repo.fullName}/pull/${prNumber}`;
+  // If no token is provided, do NOT fake a successful PR!
+  if (!token || !token.trim()) {
+    return res.status(401).json({
+      success: false,
+      requiresToken: true,
+      error: 'GitHub Personal Access Token (PAT) required: You must configure a token with "repo" permission in order to push branches and open Pull Requests on github.com.',
+      branch: branchName,
+      gitCommands: [
+        `git checkout -b ${branchName}`,
+        `git add .`,
+        `git commit -m "${title || 'fix: autonomous repair'}"`,
+        `git push -u origin ${branchName}`,
+        `gh pr create --title "${title || 'Autonomous Repair'}" --body "${body || 'Autonomous repair by RepoMaintainer.'}"`,
+      ],
+    });
+  }
 
-  res.json({
-    success: true,
-    prNumber,
-    prUrl,
-    branch: branchName,
-    message: `Pull Request #${prNumber} opened successfully on ${repo.fullName}`,
-  });
+  const [owner, repoName] = repoKey.split('/');
+  const ghHeaders = {
+    Authorization: `Bearer ${token.trim()}`,
+    'User-Agent': 'RepoMaintainer-Agent',
+    Accept: 'application/vnd.github.v3+json',
+    'Content-Type': 'application/json',
+  };
+
+  try {
+    console.log(`[GitHub API] Attempting real push and PR for ${owner}/${repoName} on branch ${branchName}...`);
+
+    // Step 1: Verify repository exists on GitHub
+    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}`, {
+      headers: ghHeaders,
+    });
+
+    if (!repoRes.ok) {
+      const errBody = await repoRes.json().catch(() => ({}));
+      if (repoRes.status === 404) {
+        return res.status(404).json({
+          success: false,
+          error: `Repository '${owner}/${repoName}' was not found on github.com. Please ensure the repository exists under account '${owner}' and your GitHub token has access to it.`,
+          branch: branchName,
+          gitCommands: [
+            `# To push to your fork or own repository:`,
+            `git remote set-url origin https://github.com/<your-username>/${repoName}.git`,
+            `git checkout -b ${branchName}`,
+            `git push -u origin ${branchName}`,
+          ],
+        });
+      }
+      return res.status(repoRes.status).json({
+        success: false,
+        error: `GitHub API error (${repoRes.status}): ${errBody.message || repoRes.statusText}`,
+      });
+    }
+
+    const repoMeta = await repoRes.json();
+    const defaultBranch = repoMeta.default_branch || 'main';
+
+    // Step 2: Get latest commit SHA on base branch
+    const refRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/${defaultBranch}`,
+      { headers: ghHeaders }
+    );
+
+    if (!refRes.ok) {
+      const errBody = await refRes.json().catch(() => ({}));
+      return res.status(refRes.status).json({
+        success: false,
+        error: `Could not retrieve default branch '${defaultBranch}' commit: ${errBody.message || refRes.statusText}`,
+      });
+    }
+
+    const refData = await refRes.json();
+    const baseCommitSha = refData.object.sha;
+
+    // Step 3: Create branch on GitHub
+    const createBranchRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repoName}/git/refs`,
+      {
+        method: 'POST',
+        headers: ghHeaders,
+        body: JSON.stringify({
+          ref: `refs/heads/${branchName}`,
+          sha: baseCommitSha,
+        }),
+      }
+    );
+
+    if (!createBranchRes.ok && createBranchRes.status !== 422) {
+      const errBody = await createBranchRes.json().catch(() => ({}));
+      return res.status(createBranchRes.status).json({
+        success: false,
+        error: `Failed to create remote branch '${branchName}' on GitHub: ${errBody.message || createBranchRes.statusText}`,
+      });
+    }
+
+    // Step 4: Commit modified files to the new branch
+    const filesToCommit: Record<string, string> = files || {};
+    if (Object.keys(filesToCommit).length === 0) {
+      Object.entries(repo.files).forEach(([p, f]) => {
+        if (f.isModified) filesToCommit[p] = f.content;
+      });
+    }
+
+    for (const [filePath, content] of Object.entries(filesToCommit)) {
+      // Check if file exists on this branch to obtain SHA
+      let fileSha: string | undefined;
+      const getFileRes = await fetch(
+        `https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}?ref=${branchName}`,
+        { headers: ghHeaders }
+      );
+
+      if (getFileRes.ok) {
+        const fileData = await getFileRes.json();
+        fileSha = fileData.sha;
+      }
+
+      // Put/commit file content
+      const putFileRes = await fetch(
+        `https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`,
+        {
+          method: 'PUT',
+          headers: ghHeaders,
+          body: JSON.stringify({
+            message: `fix(${filePath}): autonomous repair by RepoMaintainer`,
+            content: Buffer.from(content).toString('base64'),
+            branch: branchName,
+            ...(fileSha ? { sha: fileSha } : {}),
+          }),
+        }
+      );
+
+      if (!putFileRes.ok) {
+        const errBody = await putFileRes.json().catch(() => ({}));
+        return res.status(putFileRes.status).json({
+          success: false,
+          error: `Failed to commit file '${filePath}' to branch '${branchName}' on GitHub: ${errBody.message || putFileRes.statusText}`,
+        });
+      }
+    }
+
+    // Step 5: Open real Pull Request on GitHub
+    const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+      method: 'POST',
+      headers: ghHeaders,
+      body: JSON.stringify({
+        title: title || `fix(${repoName}): autonomous repair`,
+        head: branchName,
+        base: defaultBranch,
+        body: body || 'Autonomous repair by RepoMaintainer.',
+      }),
+    });
+
+    if (!prRes.ok) {
+      const errBody = await prRes.json().catch(() => ({}));
+
+      // Check if PR already exists for this head branch
+      if (
+        prRes.status === 422 &&
+        JSON.stringify(errBody).toLowerCase().includes('pull request already exists')
+      ) {
+        const listPRsRes = await fetch(
+          `https://api.github.com/repos/${owner}/${repoName}/pulls?head=${owner}:${branchName}&state=open`,
+          { headers: ghHeaders }
+        );
+        if (listPRsRes.ok) {
+          const prs = await listPRsRes.json();
+          if (prs && prs.length > 0) {
+            const existingPr = prs[0];
+
+            // Update memory
+            const memory = memoryStore[repoKey];
+            if (memory && memory.previousRepairs.length > 0) {
+              memory.previousRepairs[0].prNumber = existingPr.number;
+              memory.previousRepairs[0].prUrl = existingPr.html_url;
+              memory.previousRepairs[0].pushedToRemote = true;
+            }
+
+            return res.json({
+              success: true,
+              prNumber: existingPr.number,
+              prUrl: existingPr.html_url,
+              branch: branchName,
+              state: existingPr.state,
+              message: `Pull Request #${existingPr.number} already exists on GitHub: ${existingPr.html_url}`,
+            });
+          }
+        }
+      }
+
+      return res.status(prRes.status).json({
+        success: false,
+        error: `GitHub failed to open Pull Request: ${errBody.message || prRes.statusText}`,
+      });
+    }
+
+    const prData = await prRes.json();
+    console.log(`[GitHub API] Successfully created Pull Request #${prData.number} at ${prData.html_url}`);
+
+    // Update Persistent Project Memory with genuine GitHub URL
+    const memory = memoryStore[repoKey];
+    if (memory && memory.previousRepairs.length > 0) {
+      memory.previousRepairs[0].prNumber = prData.number;
+      memory.previousRepairs[0].prUrl = prData.html_url;
+      memory.previousRepairs[0].pushedToRemote = true;
+      delete memory.previousRepairs[0].remoteError;
+    }
+
+    res.json({
+      success: true,
+      prNumber: prData.number,
+      prUrl: prData.html_url,
+      branch: branchName,
+      state: prData.state,
+      message: `Pull Request #${prData.number} successfully created on GitHub!`,
+    });
+  } catch (err: any) {
+    console.error('[GitHub API] Network/Execution Error:', err);
+    res.status(500).json({
+      success: false,
+      error: `Network or communication error with GitHub: ${err.message}`,
+    });
+  }
 });
 
 // Mount Vite or static files

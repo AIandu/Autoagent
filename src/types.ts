@@ -21,8 +21,10 @@ export interface RepairRecord {
   filesChanged: string[];
   verificationResult: string;
   commitSha: string;
+  pushedToRemote?: boolean;
   prNumber?: number;
   prUrl?: string;
+  remoteError?: string;
 }
 
 export interface CommitRecord {

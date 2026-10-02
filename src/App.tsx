@@ -296,11 +296,11 @@ export default function App() {
       setActiveDiffs([diff]);
       setLatestRepair(repairResult.repairRecord);
 
-      // STEP 9: Commit & Pull Request Preparation
+      // STEP 9: Commit on Recoverable Branch
       addStep({
         phase: 'CREATING_COMMIT_PR',
-        title: `Committed Changes & Staged Pull Request`,
-        description: `Generated commit ${repairResult.commitSha} on branch '${repairResult.branchName}'. Pull request staged with root cause documentation and test verification proofs.`,
+        title: `Committed Changes to Branch: ${repairResult.branchName}`,
+        description: `Generated commit ${repairResult.commitSha} on isolated branch '${repairResult.branchName}'. Changes verified locally against test suites. Remote GitHub push ready.`,
         command: `git commit -m "fix(${name}): ${repairResult.repairRecord.changesSummary}"`,
         commandOutput: `[${repairResult.branchName} ${repairResult.commitSha}] fix(${name}): ${repairResult.repairRecord.changesSummary}\n 1 file changed, ${diff.additions} insertions(+), ${diff.deletions} deletions(-)`,
         commandExitCode: 0,
@@ -326,8 +326,8 @@ export default function App() {
       // Complete
       addStep({
         phase: 'COMPLETED',
-        title: `Repair Completed Successfully`,
-        description: `All tests passing. Unified diff available in Diff Viewer tab. Ready for final review and pull request merge.`,
+        title: `Local Repair Completed & Verified`,
+        description: `All tests passed cleanly. Review unified diff in 'Code Diff & PR' tab to push branch '${repairResult.branchName}' and open Pull Request on GitHub.`,
         status: 'success',
       });
     } catch (err: any) {
@@ -352,19 +352,52 @@ export default function App() {
     }, 150);
   };
 
-  const handleOpenPR = async (title: string, body: string) => {
+  const handleOpenPR = async (title: string, body: string, tokenOverride?: string) => {
     if (!latestRepair) return;
     setIsPROpening(true);
+    const tokenToUse = tokenOverride || githubToken;
+
     try {
-      await api.createPullRequest({
+      // Gather modified file contents
+      const filesPayload: Record<string, string> = {};
+      latestRepair.filesChanged.forEach((filePath) => {
+        if (currentRepoData?.files[filePath]) {
+          filesPayload[filePath] = currentRepoData.files[filePath].content;
+        }
+      });
+
+      const res = await api.createPullRequest({
         repoKey: selectedRepoKey,
         branchName: latestRepair.branch,
         title,
         body,
+        token: tokenToUse,
+        files: filesPayload,
       });
+
+      // Update latest repair with genuine GitHub PR details
+      const updatedRepair: RepairRecord = {
+        ...latestRepair,
+        pushedToRemote: true,
+        prNumber: res.prNumber,
+        prUrl: res.prUrl,
+        remoteError: undefined,
+      };
+      setLatestRepair(updatedRepair);
+
+      // Log success step in execution feed
+      addStep({
+        phase: 'COMPLETED',
+        title: `Pull Request #${res.prNumber} Opened on GitHub`,
+        description: `Successfully pushed branch '${latestRepair.branch}' to GitHub and opened Pull Request: ${res.prUrl}`,
+        status: 'success',
+      });
+
       await loadRepoDetails(selectedRepoKey);
-    } catch (err) {
-      console.error('Failed to create PR', err);
+      return res;
+    } catch (err: any) {
+      console.error('Failed to create PR on GitHub:', err);
+      throw err;
     } finally {
       setIsPROpening(false);
     }
@@ -575,6 +608,8 @@ export default function App() {
                   repoFullName={selectedRepoKey}
                   onOpenPR={handleOpenPR}
                   isPROpening={isPROpening}
+                  hasCustomToken={!!githubToken}
+                  onSaveToken={handleSaveToken}
                 />
               )}
 

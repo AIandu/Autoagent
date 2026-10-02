@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { X, Key, Shield, Check, Lock, ExternalLink, RefreshCw } from 'lucide-react';
+import { X, Key, Shield, Check, Lock, ExternalLink, RefreshCw, AlertCircle, CheckCircle2, UserCheck } from 'lucide-react';
 import { GitHubAccount } from '../types';
+import { api } from '../services/api';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -20,8 +21,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [inputVal, setInputVal] = useState(token);
   const [showSecret, setShowSecret] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{
+    tested: boolean;
+    valid?: boolean;
+    username?: string;
+    scopes?: string[];
+    hasRepoScope?: boolean;
+    error?: string;
+  } | null>(null);
 
   if (!isOpen) return null;
+
+  const handleTestToken = async () => {
+    if (!inputVal.trim()) {
+      setVerifyResult({ tested: true, valid: false, error: 'Please enter a token first.' });
+      return;
+    }
+    setIsVerifying(true);
+    setVerifyResult(null);
+    try {
+      const res = await api.verifyGitHubToken(inputVal.trim());
+      if (res.valid) {
+        setVerifyResult({
+          tested: true,
+          valid: true,
+          username: res.user?.login,
+          scopes: res.scopes,
+          hasRepoScope: res.hasRepoScope,
+        });
+      } else {
+        setVerifyResult({
+          tested: true,
+          valid: false,
+          error: res.error || 'Token invalid or expired',
+        });
+      }
+    } catch (err: any) {
+      setVerifyResult({
+        tested: true,
+        valid: false,
+        error: err.message || 'Failed to connect to GitHub API',
+      });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,12 +75,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTimeout(() => {
       setSavedSuccess(false);
       onClose();
-    }, 1000);
+    }, 800);
   };
 
   const handleClear = () => {
     setInputVal('');
     onSaveToken('');
+    setVerifyResult(null);
   };
 
   return (
@@ -46,7 +92,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="flex items-center gap-2">
             <Key className="w-4 h-4 text-emerald-400" />
             <h3 className="text-sm font-semibold text-zinc-100">
-              GitHub Credentials & Safety Policies
+              GitHub Credentials & Remote Push Setup
             </h3>
           </div>
           <button
@@ -61,7 +107,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Managed Owners */}
           <div>
             <label className="text-xs font-semibold text-zinc-300 uppercase tracking-wide block mb-2">
-              Configured GitHub Owners
+              Managed GitHub Accounts
             </label>
             <div className="grid grid-cols-2 gap-3">
               {accounts.map((acc) => (
@@ -93,25 +139,80 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <label className="text-xs font-semibold text-zinc-300">
                 Personal Access Token (PAT)
               </label>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowSecret(!showSecret)}
+                  className="text-[11px] text-emerald-400 hover:underline"
+                >
+                  {showSecret ? 'Hide Token' : 'Reveal Token'}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <input
+                  type={showSecret ? 'text' : 'password'}
+                  placeholder="ghp_************************************"
+                  value={inputVal}
+                  onChange={(e) => {
+                    setInputVal(e.target.value);
+                    setVerifyResult(null);
+                  }}
+                  className="w-full px-3 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
               <button
                 type="button"
-                onClick={() => setShowSecret(!showSecret)}
-                className="text-[11px] text-emerald-400 hover:underline"
+                onClick={handleTestToken}
+                disabled={isVerifying || !inputVal.trim()}
+                className="px-3 py-2 rounded-lg text-xs font-medium bg-zinc-800 hover:bg-zinc-750 disabled:bg-zinc-900 disabled:text-zinc-600 text-zinc-200 border border-zinc-700 transition-colors flex items-center gap-1.5 shrink-0"
               >
-                {showSecret ? 'Hide Token' : 'Reveal Token'}
+                {isVerifying ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                ) : (
+                  <UserCheck className="w-3.5 h-3.5" />
+                )}
+                <span>{isVerifying ? 'Verifying...' : 'Test Connection'}</span>
               </button>
             </div>
-            <div className="relative">
-              <input
-                type={showSecret ? 'text' : 'password'}
-                placeholder="ghp_************************************"
-                value={inputVal}
-                onChange={(e) => setInputVal(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
-              />
-            </div>
-            <p className="text-[11px] text-zinc-500 mt-1.5 leading-relaxed">
-              Required scopes: <code className="text-zinc-400">repo</code> (Full control of private repositories) and <code className="text-zinc-400">workflow</code> (GitHub Actions). When omitted, agent runs against local repository sandbox with simulated GitHub push.
+
+            {/* Test result feedback */}
+            {verifyResult && (
+              <div className="mt-2.5">
+                {verifyResult.valid ? (
+                  <div className="p-2.5 rounded-lg bg-emerald-950/60 border border-emerald-800/80 text-xs text-emerald-200 flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-semibold">GitHub Connection Confirmed!</span>
+                      <p className="text-[11px] text-zinc-300 mt-0.5">
+                        Authenticated as <strong className="text-emerald-300">@{verifyResult.username}</strong>. Scopes: <code className="font-mono text-zinc-400">{verifyResult.scopes?.join(', ') || 'none'}</code>.
+                        {!verifyResult.hasRepoScope && (
+                          <span className="text-amber-300 block mt-1">
+                            Warning: Token is missing the 'repo' scope. Pushing branches and PRs may fail without 'repo' permission.
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-2.5 rounded-lg bg-rose-950/60 border border-rose-800/80 text-xs text-rose-200 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-semibold">Authentication Failed</span>
+                      <p className="text-[11px] text-rose-300/90 mt-0.5">
+                        {verifyResult.error}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <p className="text-[11px] text-zinc-500 mt-2 leading-relaxed">
+              Required permission: <code className="text-zinc-300 bg-zinc-800 px-1 py-0.5 rounded font-mono">repo</code> (Full control of private repositories) to allow the agent to create branches and open Pull Requests directly on GitHub.
             </p>
           </div>
 
@@ -124,7 +225,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <ul className="text-[11px] text-zinc-400 space-y-1.5 pl-1">
               <li className="flex items-center gap-2">
                 <Check className="w-3 h-3 text-emerald-400 shrink-0" />
-                <span>Never erase or rewrite functioning project architecture.</span>
+                <span>Never claims a push or pull request completed unless GitHub API returns 201 Created.</span>
               </li>
               <li className="flex items-center gap-2">
                 <Check className="w-3 h-3 text-emerald-400 shrink-0" />
@@ -132,7 +233,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </li>
               <li className="flex items-center gap-2">
                 <Check className="w-3 h-3 text-emerald-400 shrink-0" />
-                <span>Execution Failure Rule: Halts retry loops if sandbox blocks external network or system sockets.</span>
+                <span>Always operates on dedicated isolated branches (`repair/...`) before pushing.</span>
               </li>
             </ul>
           </div>

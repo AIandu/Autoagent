@@ -300,9 +300,19 @@ export const ProjectMemoryViewer: React.FC<ProjectMemoryViewerProps> = ({
                     <span className="text-emerald-400">
                       ✓ {rep.verificationResult}
                     </span>
-                    {rep.prUrl && (
-                      <span className="text-indigo-400 flex items-center gap-1">
-                        PR Staged <ExternalLink className="w-2.5 h-2.5" />
+                    {rep.prUrl ? (
+                      <a
+                        href={rep.prUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-medium transition-colors"
+                      >
+                        <span>GitHub PR #{rep.prNumber || ''}</span>
+                        <ExternalLink className="w-2.5 h-2.5" />
+                      </a>
+                    ) : (
+                      <span className="text-zinc-500 font-mono">
+                        Branch: {rep.branch} (Local)
                       </span>
                     )}
                   </div>

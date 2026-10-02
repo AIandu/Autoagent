@@ -92,24 +92,53 @@ export const api = {
     return res.json();
   },
 
+  async verifyGitHubToken(token: string): Promise<{
+    valid: boolean;
+    user?: { login: string; name: string; avatarUrl: string; htmlUrl: string };
+    scopes?: string[];
+    hasRepoScope?: boolean;
+    isTargetOwner?: boolean;
+    error?: string;
+  }> {
+    const res = await fetch('/api/github/verify-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    return res.json();
+  },
+
   async createPullRequest(params: {
     repoKey: string;
     branchName: string;
     title: string;
     body: string;
+    token?: string;
+    files?: Record<string, string>;
   }): Promise<{
     success: boolean;
-    prNumber: number;
-    prUrl: string;
+    prNumber?: number;
+    prUrl?: string;
     branch: string;
-    message: string;
+    message?: string;
+    error?: string;
+    requiresToken?: boolean;
+    gitCommands?: string[];
   }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (params.token) headers['x-github-token'] = params.token;
     const res = await fetch('/api/github/create-pr', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(params),
     });
-    if (!res.ok) throw new Error('Failed to create PR');
-    return res.json();
+    const data = await res.json();
+    if (!res.ok) {
+      const err = new Error(data.error || 'Failed to create PR');
+      (err as any).requiresToken = data.requiresToken;
+      (err as any).gitCommands = data.gitCommands;
+      throw err;
+    }
+    return data;
   },
 };
